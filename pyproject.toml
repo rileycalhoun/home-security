@@ -1,0 +1,31 @@
+[project]
+name = "home-face-recognition"
+version = "0.1.0"
+description = "Local, browser-based face recognition — the first building block of a DIY home security system."
+readme = "README.md"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.9,<3.12"
+dependencies = [
+  "facenet-pytorch==2.6.0",
+  "opencv-python==4.11.0.86",
+  "pillow==10.2.0",
+  "pyturso>=0.5.1",
+  "torch==2.2.2",
+  "urllib3<2",
+]
+
+[project.scripts]
+home-face-recognition = "home_face_recognition.server:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["home_face_recognition"]

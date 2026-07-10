@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Face Recognition</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-scan-interval="{{ scan_interval_ms }}">
+  <main class="card">
+    <header class="card-header">
+      <div class="title">
+        <span id="camDot" class="cam-dot" aria-hidden="true"></span>
+        <h1>Home Face Recognition</h1>
+      </div>
+      <span id="knownBadge" class="badge">&hellip;</span>
+    </header>
+    <div class="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="stageMessage" class="stage-message">Starting camera&hellip;</div>
+    </div>
+    <section class="controls">
+      <div id="status" class="status info">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="statusText">Starting camera&hellip;</span>
+      </div>
+      <div id="nameRow" class="name-row">
+        <input id="nameInput" autocomplete="off" maxlength="64" placeholder="Who is this?">
+        <button id="saveName" class="btn primary">Save</button>
+        <button id="cancelName" class="btn ghost">Cancel</button>
+      </div>
+      <button id="saveFace" class="btn primary" disabled>Save this face</button>
+    </section>
+  </main>
+  <canvas id="capture" hidden></canvas>
+  <script src="/static/app.js"></script>
+</body>
+</html>

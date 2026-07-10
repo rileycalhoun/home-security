@@ -1,0 +1,9 @@
+# Face embeddings are personal biometric data — never commit them.
+known_faces.db*
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+.DS_Store
