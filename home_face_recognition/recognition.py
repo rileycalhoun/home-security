@@ -66,7 +66,7 @@ class Recognizer:
         if scale < 1.0:
             frame = cv2.resize(frame, (DETECTION_WIDTH, int(original_h * scale)))
         image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        boxes, probs = self.mtcnn.detect(image)
+        boxes, probs, *_ = self.mtcnn.detect(image)
         if boxes is None:
             return []
 

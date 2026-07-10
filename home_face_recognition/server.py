@@ -2,11 +2,11 @@
 
 import argparse
 import json
-import sys
 import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlparse
 
 from .config import (
@@ -17,6 +17,9 @@ from .config import (
     SCAN_EVERY_MS,
 )
 from .storage import FaceStore, StoreError
+
+if TYPE_CHECKING:
+    from .recognition import Recognizer
 
 PACKAGE_DIR = Path(__file__).parent
 
@@ -47,7 +50,7 @@ def load_static_assets():
 
 
 class Handler(BaseHTTPRequestHandler):
-    recognizer = None
+    recognizer: ClassVar["Recognizer"]
     index_html = b""
     static_assets = {}
 
