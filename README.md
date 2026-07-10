@@ -69,6 +69,8 @@ uv run pytest
 
 ## Roadmap
 
-This is the recognition core of what will grow into a full home security
-system: multiple/IP cameras, event logging, notifications on unknown faces,
-and a management UI for the face database.
+This is the recognition core of what will grow into a full local-first home
+security system: a management dashboard, local authentication, multi-camera
+monitoring, Home Assistant integration, event logging with notifications, and
+smart device automations. The full plan lives in
+[docs/ROADMAP.md](docs/ROADMAP.md).
