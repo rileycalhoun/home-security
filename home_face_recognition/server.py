@@ -1,12 +1,14 @@
-"""HTTP server exposing the recognizer to the browser UI."""
+"""HTTP server exposing the dashboard and the versioned JSON API."""
 
 import argparse
 import json
+import threading
 import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
+
 from urllib.parse import urlparse
 
 from .config import (
@@ -14,7 +16,7 @@ from .config import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     MAX_BODY_BYTES,
-    SCAN_EVERY_MS,
+    SETTINGS_SPEC,
 )
 from .storage import FaceStore, StoreError
 
@@ -28,9 +30,8 @@ class PayloadTooLarge(Exception):
     pass
 
 
-def render_index():
-    html = (PACKAGE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
-    return html.replace("{{ scan_interval_ms }}", str(SCAN_EVERY_MS)).encode()
+class NotFound(Exception):
+    pass
 
 
 def load_static_assets():
@@ -38,6 +39,10 @@ def load_static_assets():
     # paths can never reach the filesystem.
     static_dir = PACKAGE_DIR / "static"
     return {
+        "/": (
+            (PACKAGE_DIR / "templates" / "index.html").read_bytes(),
+            "text/html; charset=utf-8",
+        ),
         "/static/style.css": (
             (static_dir / "style.css").read_bytes(),
             "text/css; charset=utf-8",
@@ -51,31 +56,37 @@ def load_static_assets():
 
 class Handler(BaseHTTPRequestHandler):
     recognizer: ClassVar["Recognizer"]
-    index_html = b""
-    static_assets = {}
+    store: ClassVar[FaceStore]
+    lock: ClassVar[threading.Lock] = threading.Lock()
+    static_assets: ClassVar[dict] = {}
 
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/":
-            self.send_bytes(HTTPStatus.OK, self.index_html, "text/html; charset=utf-8")
-        elif path in self.static_assets:
-            body, content_type = self.static_assets[path]
-            self.send_bytes(HTTPStatus.OK, body, content_type)
-        elif path == "/health":
-            self.send_json({"ok": True})
-        else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+        self.dispatch("GET")
 
     def do_POST(self):
+        self.dispatch("POST")
+
+    def do_PATCH(self):
+        self.dispatch("PATCH")
+
+    def do_PUT(self):
+        self.dispatch("PUT")
+
+    def do_DELETE(self):
+        self.dispatch("DELETE")
+
+    def dispatch(self, method):
         path = urlparse(self.path).path
         try:
-            body = self.read_body()
-            if path == "/scan":
-                self.send_json(self.recognizer.scan(body))
-            elif path == "/save":
-                self.send_json(self.recognizer.save(self.parse_name(body)))
+            if path.startswith("/api/"):
+                self.handle_api(method, path)
+            elif method == "GET" and path in self.static_assets:
+                body, content_type = self.static_assets[path]
+                self.send_bytes(HTTPStatus.OK, body, content_type)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except NotFound:
+            self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
         except PayloadTooLarge:
             # The unread body would be misparsed as the next keep-alive
             # request, so drop the connection after responding.
@@ -93,15 +104,98 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    def handle_api(self, method, path):
+        segments = [segment for segment in path.split("/") if segment]
+        if len(segments) < 3 or segments[1] != "v1":
+            raise NotFound()
+        resource = segments[2:]
+
+        if resource == ["health"] and method == "GET":
+            return self.send_json({"ok": True})
+
+        if resource == ["scan"] and method == "POST":
+            return self.send_json(self.recognizer.scan(self.read_body()))
+
+        if resource == ["enroll"] and method == "POST":
+            name = self.read_json().get("name", "")
+            if not isinstance(name, str):
+                raise ValueError("Expected a JSON object with a string 'name'.")
+            return self.send_json(self.recognizer.enroll(name))
+
+        if resource == ["people"] and method == "GET":
+            with self.lock:
+                people = self.store.people()
+            return self.send_json({"people": people})
+
+        if len(resource) == 2 and resource[0] == "people":
+            return self.handle_person(method, self.parse_id(resource[1]))
+
+        if (
+            len(resource) == 4
+            and resource[0] == "people"
+            and resource[2] == "embeddings"
+            and method == "DELETE"
+        ):
+            person_id = self.parse_id(resource[1])
+            embedding_id = self.parse_id(resource[3])
+            with self.lock:
+                deleted = self.store.delete_embedding(person_id, embedding_id)
+            if not deleted:
+                raise NotFound()
+            return self.send_json({"deleted": True})
+
+        if resource == ["settings"]:
+            if method == "GET":
+                with self.lock:
+                    settings = dict(self.store.settings)
+                return self.send_json({"settings": settings, "spec": SETTINGS_SPEC})
+            if method == "PUT":
+                updates = self.read_json()
+                with self.lock:
+                    settings = self.store.save_settings(updates)
+                return self.send_json({"settings": settings})
+
+        raise NotFound()
+
+    def handle_person(self, method, person_id):
+        if method == "GET":
+            with self.lock:
+                person = self.store.person(person_id)
+            if person is None:
+                raise NotFound()
+            return self.send_json(person)
+        if method == "PATCH":
+            name = self.read_json().get("name", "")
+            if not isinstance(name, str):
+                raise ValueError("Expected a JSON object with a string 'name'.")
+            with self.lock:
+                person = self.store.rename_person(person_id, name)
+            if person is None:
+                raise NotFound()
+            return self.send_json(person)
+        if method == "DELETE":
+            with self.lock:
+                deleted = self.store.delete_person(person_id)
+            if not deleted:
+                raise NotFound()
+            return self.send_json({"deleted": True})
+        raise NotFound()
+
     @staticmethod
-    def parse_name(body):
+    def parse_id(segment):
         try:
-            data = json.loads(body.decode() or "{}")
+            return int(segment)
+        except ValueError:
+            raise NotFound()
+
+    def read_json(self):
+        try:
+            data = json.loads(self.read_body().decode() or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise ValueError("Request body must be JSON.")
-        if not isinstance(data, dict) or not isinstance(data.get("name", ""), str):
-            raise ValueError("Expected a JSON object with a string 'name'.")
-        return data.get("name", "")
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object.")
+        return data
 
     def read_body(self):
         try:
@@ -154,8 +248,8 @@ def main(argv=None):
     print("Loading models (first run downloads ~110 MB of weights)...")
     from .recognition import Recognizer  # deferred: importing torch/facenet is slow
 
-    Handler.recognizer = Recognizer(store)
-    Handler.index_html = render_index()
+    Handler.store = store
+    Handler.recognizer = Recognizer(store, Handler.lock)
     Handler.static_assets = load_static_assets()
 
     try:
@@ -163,7 +257,7 @@ def main(argv=None):
     except OSError as exc:
         raise SystemExit(f"error: could not bind {args.host}:{args.port} ({exc})")
 
-    print(f"Known faces: {len(store.known)}")
+    print(f"Known people: {store.person_count()}")
     print(f"Open http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}")
     try:
         server.serve_forever()

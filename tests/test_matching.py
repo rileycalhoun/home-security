@@ -23,7 +23,7 @@ def test_distant_face_is_unknown():
 
 
 def test_empty_database_is_unknown():
-    assert match_embedding(torch.tensor([1.0, 0.0]), [], known_tensor([])) == ("Unknown", None)
+    assert match_embedding(torch.tensor([1.0, 0.0]), [], known_tensor([]), 0.8) == ("Unknown", None)
 
 
 def test_area():

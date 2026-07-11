@@ -3,8 +3,6 @@
 import torch
 import torch.nn.functional as F
 
-from .config import MATCH_DISTANCE
-
 
 def known_tensor(known):
     if not known:
@@ -15,7 +13,7 @@ def known_tensor(known):
     return F.normalize(embeddings, dim=1)
 
 
-def match_embedding(embedding, known, embeddings, threshold=MATCH_DISTANCE):
+def match_embedding(embedding, known, embeddings, threshold):
     if len(known) == 0:
         return "Unknown", None
     embedding = F.normalize(embedding.float().view(1, -1), dim=1)

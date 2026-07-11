@@ -1,29 +1,109 @@
 "use strict";
 
-const video = document.getElementById("video");
-const overlay = document.getElementById("overlay");
-const capture = document.getElementById("capture");
-const stageMessage = document.getElementById("stageMessage");
-const statusEl = document.getElementById("status");
-const statusText = document.getElementById("statusText");
-const knownBadge = document.getElementById("knownBadge");
-const camDot = document.getElementById("camDot");
-const nameRow = document.getElementById("nameRow");
-const nameInput = document.getElementById("nameInput");
-const saveFace = document.getElementById("saveFace");
-const saveName = document.getElementById("saveName");
-const cancelName = document.getElementById("cancelName");
+const $ = (id) => document.getElementById(id);
+
+const video = $("video");
+const overlay = $("overlay");
+const capture = $("capture");
+const stageMessage = $("stageMessage");
+const statusEl = $("status");
+const statusText = $("statusText");
+const knownBadge = $("knownBadge");
+const camDot = $("camDot");
+const enrollPanel = $("enrollPanel");
+const qualityFeedback = $("qualityFeedback");
+const nameInput = $("nameInput");
+const peopleNames = $("peopleNames");
+const enrollFace = $("enrollFace");
+const saveName = $("saveName");
+const cancelName = $("cancelName");
+const peopleList = $("peopleList");
+const peopleStatus = $("peopleStatus");
+const settingsForm = $("settingsForm");
+const settingsFields = $("settingsFields");
+const settingsReset = $("settingsReset");
+const settingsStatus = $("settingsStatus");
 const overlayCtx = overlay.getContext("2d");
 const captureCtx = capture.getContext("2d");
 
-const SCAN_INTERVAL_MS = Number(document.body.dataset.scanInterval) || 450;
 const LABEL_FONT =
   '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+const VIEWS = ["cameras", "people", "events", "settings"];
 
+let settings = { scan_interval_ms: 450 };
+let settingsSpec = null;
+let scanTimer = null;
 let scanInFlight = false;
-let saveInFlight = false;
+let enrollInFlight = false;
+let enrolling = false;
 let lastFaces = [];
 let lastFrame = { width: 1, height: 1 };
+let activeView = "cameras";
+
+// ---------- shared helpers ----------
+
+async function api(path, options = {}) {
+  const response = await fetch(`/api/v1${path}`, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+function postJSON(payload) {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  };
+}
+
+function formatDate(iso) {
+  const date = new Date(iso);
+  return isNaN(date)
+    ? iso
+    : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function button(label, classes) {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = `btn ${classes}`;
+  el.textContent = label;
+  return el;
+}
+
+function emptyState(text) {
+  const el = document.createElement("div");
+  el.className = "card empty-state muted";
+  el.textContent = text;
+  return el;
+}
+
+// ---------- routing ----------
+
+function viewFromHash() {
+  const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
+  return VIEWS.includes(name) ? name : "cameras";
+}
+
+function showView(name) {
+  activeView = name;
+  for (const view of VIEWS) $(`view-${view}`).hidden = view !== name;
+  for (const link of document.querySelectorAll(".nav a")) {
+    link.classList.toggle("active", link.dataset.view === name);
+  }
+  if (name === "cameras") drawFaces();
+  if (name === "people") loadPeople();
+  if (name === "settings") loadSettingsPage();
+}
+
+window.addEventListener("hashchange", () => showView(viewFromHash()));
+
+// ---------- cameras ----------
 
 function setStatus(text, kind = "info") {
   statusText.textContent = text;
@@ -81,7 +161,7 @@ function describeScan(data) {
 }
 
 async function scanFrame() {
-  if (scanInFlight || document.hidden || !video.videoWidth) return;
+  if (scanInFlight || document.hidden || activeView !== "cameras" || !video.videoWidth) return;
   scanInFlight = true;
   try {
     const maxWidth = 640;
@@ -94,15 +174,13 @@ async function scanFrame() {
       capture.toBlob(resolve, "image/jpeg", 0.72)
     );
     if (!blob) return;
-    const response = await fetch("/scan", {
+    const data = await api("/scan", {
       method: "POST",
       headers: { "Content-Type": "image/jpeg" },
       body: blob,
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     lastFaces = data.faces;
-    saveFace.disabled = lastFaces.length === 0;
+    enrollFace.disabled = lastFaces.length === 0;
     updateKnownBadge(data.known);
     const anyUnknown = lastFaces.some((face) => face.name === "Unknown");
     setStatus(
@@ -110,6 +188,7 @@ async function scanFrame() {
       data.detected === 0 ? "info" : anyUnknown ? "warn" : "ok"
     );
     drawFaces();
+    updateQuality();
   } catch (error) {
     setStatus(`Recognition error: ${error.message}`, "error");
   } finally {
@@ -117,31 +196,9 @@ async function scanFrame() {
   }
 }
 
-function closeNameRow() {
-  nameRow.classList.remove("active");
-}
-
-async function saveCurrentFace() {
-  if (saveInFlight) return;
-  saveInFlight = true;
-  saveName.disabled = true;
-  try {
-    const response = await fetch("/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: nameInput.value.trim() }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    closeNameRow();
-    updateKnownBadge(data.known);
-    setStatus(data.status, "ok");
-  } catch (error) {
-    setStatus(error.message || "Could not save face.", "error");
-  } finally {
-    saveInFlight = false;
-    saveName.disabled = false;
-  }
+function startScanLoop() {
+  if (scanTimer) clearInterval(scanTimer);
+  scanTimer = setInterval(scanFrame, settings.scan_interval_ms || 450);
 }
 
 async function startCamera() {
@@ -162,7 +219,7 @@ async function startCamera() {
     camDot.classList.add("live");
     setStatus("Camera ready.", "ok");
     drawFaces();
-    setInterval(scanFrame, SCAN_INTERVAL_MS);
+    startScanLoop();
   } catch (error) {
     camDot.classList.add("off");
     stageMessage.textContent = `Could not open camera: ${error.message}`;
@@ -170,22 +227,353 @@ async function startCamera() {
   }
 }
 
-saveFace.addEventListener("click", () => {
-  nameRow.classList.add("active");
+// ---------- enrollment ----------
+
+function setQuality(text, kind) {
+  qualityFeedback.textContent = text;
+  qualityFeedback.className = `quality ${kind}`;
+}
+
+function largestFace() {
+  let best = null;
+  let bestArea = -1;
+  for (const face of lastFaces) {
+    const [x1, y1, x2, y2] = face.box;
+    const area = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    if (area > bestArea) {
+      best = face;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+function updateQuality() {
+  if (!enrolling) return;
+  const face = largestFace();
+  if (!face) {
+    setQuality("No face in view — step into frame.", "warn");
+    saveName.disabled = true;
+    return;
+  }
+  if (!face.quality.ok) {
+    setQuality(face.quality.issues.join(" "), "warn");
+    saveName.disabled = true;
+    return;
+  }
+  setQuality(
+    face.name === "Unknown"
+      ? "Looking good — hold still and enroll."
+      : `Looking good — currently matched as ${face.name}.`,
+    "ok"
+  );
+  saveName.disabled = enrollInFlight;
+}
+
+function openEnrollPanel() {
+  enrolling = true;
+  enrollPanel.classList.add("active");
+  enrollFace.hidden = true;
   nameInput.value = "";
   nameInput.focus();
-  setStatus("Enter a name, then press Return or Save.", "info");
-});
+  updateQuality();
+  loadPeopleNames();
+}
 
-saveName.addEventListener("click", saveCurrentFace);
-cancelName.addEventListener("click", closeNameRow);
+function closeEnrollPanel() {
+  enrolling = false;
+  enrollPanel.classList.remove("active");
+  enrollFace.hidden = false;
+}
+
+async function loadPeopleNames() {
+  try {
+    const data = await api("/people");
+    peopleNames.replaceChildren(
+      ...data.people.map((person) => {
+        const option = document.createElement("option");
+        option.value = person.name;
+        return option;
+      })
+    );
+  } catch {
+    // The datalist is a nicety; enrollment works without it.
+  }
+}
+
+async function enroll() {
+  if (enrollInFlight) return;
+  enrollInFlight = true;
+  saveName.disabled = true;
+  try {
+    const data = await api("/enroll", postJSON({ name: nameInput.value.trim() }));
+    closeEnrollPanel();
+    updateKnownBadge(data.known);
+    setStatus(data.status, "ok");
+  } catch (error) {
+    setQuality(error.message || "Could not enroll face.", "error");
+  } finally {
+    enrollInFlight = false;
+    saveName.disabled = false;
+  }
+}
+
+enrollFace.addEventListener("click", openEnrollPanel);
+saveName.addEventListener("click", enroll);
+cancelName.addEventListener("click", closeEnrollPanel);
 nameInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") saveCurrentFace();
-  if (event.key === "Escape") closeNameRow();
-});
-window.addEventListener("resize", drawFaces);
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) drawFaces();
+  if (event.key === "Enter") {
+    event.preventDefault();
+    enroll();
+  }
+  if (event.key === "Escape") closeEnrollPanel();
 });
 
-startCamera();
+// ---------- people ----------
+
+function setPeopleStatus(text) {
+  peopleStatus.textContent = text;
+}
+
+async function loadPeople() {
+  setPeopleStatus("");
+  try {
+    const data = await api("/people");
+    renderPeople(data.people);
+  } catch (error) {
+    peopleList.replaceChildren(emptyState(`Could not load people: ${error.message}`));
+  }
+}
+
+function renderPeople(people) {
+  if (!people.length) {
+    peopleList.replaceChildren(
+      emptyState("No one enrolled yet — enroll a face from the Cameras page.")
+    );
+    return;
+  }
+  peopleList.replaceChildren(...people.map(personCard));
+}
+
+function personCard(person) {
+  const card = document.createElement("div");
+  card.className = "card person";
+
+  const info = document.createElement("div");
+  info.className = "person-info";
+  const nameEl = document.createElement("div");
+  nameEl.className = "person-name";
+  nameEl.textContent = person.name;
+  const meta = document.createElement("div");
+  meta.className = "person-meta";
+  meta.textContent = `${plural(person.embedding_count, "enrollment")} · added ${formatDate(person.created_at)}`;
+  info.append(nameEl, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "person-actions";
+  const detailsBtn = button("Details", "ghost");
+  const renameBtn = button("Rename", "ghost");
+  const deleteBtn = button("Delete", "ghost danger");
+  actions.append(detailsBtn, renameBtn, deleteBtn);
+
+  const row = document.createElement("div");
+  row.className = "person-row";
+  row.append(info, actions);
+
+  const details = document.createElement("div");
+  details.className = "person-details";
+  details.hidden = true;
+
+  card.append(row, details);
+
+  detailsBtn.addEventListener("click", async () => {
+    if (!details.hidden) {
+      details.hidden = true;
+      return;
+    }
+    await fillDetails(details, person.id);
+    details.hidden = false;
+  });
+
+  renameBtn.addEventListener("click", () => startRename(card, person));
+
+  deleteBtn.addEventListener("click", async () => {
+    const what = `${person.name} and their ${plural(person.embedding_count, "enrollment")}`;
+    if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
+    try {
+      await api(`/people/${person.id}`, { method: "DELETE" });
+      loadPeople();
+    } catch (error) {
+      setPeopleStatus(error.message);
+    }
+  });
+
+  return card;
+}
+
+async function fillDetails(details, personId) {
+  try {
+    const person = await api(`/people/${personId}`);
+    if (!person.embeddings.length) {
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.textContent = "No enrollments — this person can't be matched until you enroll their face.";
+      details.replaceChildren(note);
+      return;
+    }
+    details.replaceChildren(
+      ...person.embeddings.map((embedding) => {
+        const row = document.createElement("div");
+        row.className = "embedding-row";
+        const label = document.createElement("span");
+        label.textContent = `Enrolled ${formatDate(embedding.created_at)}`;
+        const remove = button("Remove", "ghost danger small");
+        remove.addEventListener("click", async () => {
+          try {
+            await api(`/people/${personId}/embeddings/${embedding.id}`, { method: "DELETE" });
+            loadPeople();
+          } catch (error) {
+            setPeopleStatus(error.message);
+          }
+        });
+        row.append(label, remove);
+        return row;
+      })
+    );
+  } catch (error) {
+    setPeopleStatus(error.message);
+  }
+}
+
+function startRename(card, person) {
+  if (card.querySelector(".rename-row")) return;
+  const rename = document.createElement("div");
+  rename.className = "name-row rename-row active";
+  const input = document.createElement("input");
+  input.value = person.name;
+  input.maxLength = 64;
+  const save = button("Save", "primary");
+  const cancel = button("Cancel", "ghost");
+  rename.append(input, save, cancel);
+  card.append(rename);
+  input.focus();
+  input.select();
+
+  const doRename = async () => {
+    try {
+      await api(`/people/${person.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: input.value }),
+      });
+      loadPeople();
+    } catch (error) {
+      setPeopleStatus(error.message);
+    }
+  };
+  save.addEventListener("click", doRename);
+  cancel.addEventListener("click", () => rename.remove());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      doRename();
+    }
+    if (event.key === "Escape") rename.remove();
+  });
+}
+
+// ---------- settings ----------
+
+async function loadSettingsPage() {
+  settingsStatus.textContent = "";
+  try {
+    const data = await api("/settings");
+    settings = data.settings;
+    settingsSpec = data.spec;
+    renderSettingsFields();
+  } catch (error) {
+    settingsStatus.textContent = `Could not load settings: ${error.message}`;
+  }
+}
+
+function renderSettingsFields() {
+  settingsFields.replaceChildren(
+    ...Object.entries(settingsSpec).map(([key, spec]) => {
+      const field = document.createElement("label");
+      field.className = "field";
+      const title = document.createElement("span");
+      title.className = "field-label";
+      title.textContent = spec.label;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.name = key;
+      input.min = spec.min;
+      input.max = spec.max;
+      input.step = spec.step;
+      input.value = settings[key];
+      input.required = true;
+      const help = document.createElement("span");
+      help.className = "field-help";
+      help.textContent = spec.help;
+      field.append(title, input, help);
+      return field;
+    })
+  );
+}
+
+settingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const updates = {};
+  for (const input of settingsFields.querySelectorAll("input")) {
+    updates[input.name] = Number(input.value);
+  }
+  try {
+    const data = await api("/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    settings = data.settings;
+    startScanLoop();
+    settingsStatus.textContent = "Saved.";
+  } catch (error) {
+    settingsStatus.textContent = error.message;
+  }
+});
+
+settingsReset.addEventListener("click", () => {
+  if (!settingsSpec) return;
+  for (const input of settingsFields.querySelectorAll("input")) {
+    input.value = settingsSpec[input.name].default;
+  }
+  settingsStatus.textContent = "Defaults restored — press Save to apply.";
+});
+
+// ---------- startup ----------
+
+window.addEventListener("resize", () => {
+  if (activeView === "cameras") drawFaces();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && activeView === "cameras") drawFaces();
+});
+
+async function init() {
+  showView(viewFromHash());
+  try {
+    const data = await api("/settings");
+    settings = data.settings;
+    settingsSpec = data.spec;
+  } catch {
+    // Defaults keep the scan loop running until the server responds.
+  }
+  try {
+    const data = await api("/people");
+    updateKnownBadge(data.people.filter((person) => person.embedding_count > 0).length);
+  } catch {
+    // The badge fills in on the first successful scan.
+  }
+  startCamera();
+}
+
+init();
