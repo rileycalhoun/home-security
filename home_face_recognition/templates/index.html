@@ -7,7 +7,28 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="app">
+  <main id="authScreen" class="auth-screen" hidden>
+    <form id="authForm" class="auth-panel">
+      <div class="brand auth-brand">
+        <span class="cam-dot" aria-hidden="true"></span>
+        <span class="brand-name">Home Face Recognition</span>
+      </div>
+      <h1 id="authTitle">Sign in</h1>
+      <p id="authHelp" class="muted">Use your local account to continue.</p>
+      <label class="field">
+        <span class="field-label">Username</span>
+        <input id="authUsername" name="username" autocomplete="username" maxlength="64" required autofocus>
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="12" required>
+      </label>
+      <button id="authSubmit" class="btn primary" type="submit">Sign in</button>
+      <span id="authStatus" class="page-status" role="status"></span>
+    </form>
+  </main>
+
+  <div id="dashboard" class="app" hidden>
     <aside class="sidebar">
       <div class="brand">
         <span id="camDot" class="cam-dot" aria-hidden="true"></span>
@@ -18,7 +39,12 @@
         <a href="#/people" data-view="people">People</a>
         <a href="#/events" data-view="events">Events</a>
         <a href="#/settings" data-view="settings">Settings</a>
+        <a href="#/users" data-view="users">Users</a>
       </nav>
+      <div class="account">
+        <span id="accountName"></span>
+        <button id="logout" class="btn ghost small" type="button">Sign out</button>
+      </div>
     </aside>
 
     <main class="content">
@@ -83,6 +109,24 @@
             <span id="settingsStatus" class="page-status" role="status"></span>
           </div>
         </form>
+      </section>
+
+      <section id="view-users" class="view" hidden>
+        <div class="view-header">
+          <h1>Users</h1>
+          <span id="usersStatus" class="page-status" role="status"></span>
+        </div>
+        <form id="createUserForm" class="card user-form">
+          <input name="username" autocomplete="off" maxlength="64" placeholder="Username" required>
+          <input name="password" type="password" autocomplete="new-password" minlength="12"
+                 placeholder="Password (12+ characters)" required>
+          <select name="role" aria-label="Role">
+            <option value="viewer">Viewer</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button class="btn primary" type="submit">Create user</button>
+        </form>
+        <div id="usersList" class="people-list users-list"></div>
       </section>
     </main>
   </div>

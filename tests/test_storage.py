@@ -142,6 +142,21 @@ def test_settings_validation(store):
     assert store.settings["match_distance"] == SETTINGS_SPEC["match_distance"]["default"]
 
 
+def test_users_and_sessions_survive_reopen(tmp_path):
+    path = tmp_path / "known_faces.db"
+    store = FaceStore(path)
+    user = store.create_user("owner", "a sufficiently long password", "admin")
+    token, _ = store.create_session(user["id"])
+    store.close()
+
+    reloaded = FaceStore(path)
+    authenticated = reloaded.authenticate("OWNER", "a sufficiently long password")
+    session = reloaded.session(token)
+    assert authenticated is not None and authenticated["id"] == user["id"]
+    assert session is not None and session["username"] == "owner"
+    reloaded.close()
+
+
 def test_migrates_v1_schema(tmp_path):
     path = tmp_path / "known_faces.db"
     packer = struct.Struct(f"<{EMBEDDING_DIM}f")

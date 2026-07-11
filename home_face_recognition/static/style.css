@@ -19,8 +19,31 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   color: var(--text);
-  background: radial-gradient(1200px 800px at 50% -10%, #1a2332, var(--bg) 60%);
+  background: var(--bg);
 }
+
+[hidden] { display: none !important; }
+
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.auth-panel {
+  width: min(100%, 380px);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.auth-panel h1 { margin: 8px 0 0; font-size: 22px; }
+.auth-panel p { margin: -8px 0 4px; font-size: 14px; }
+.auth-brand { padding: 0; }
 
 /* ---------- layout ---------- */
 
@@ -39,6 +62,16 @@ body {
   gap: 20px;
   padding: 18px 14px;
   border-right: 1px solid var(--border);
+}
+
+.account {
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+  padding: 12px 6px 0;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .brand {
@@ -132,7 +165,7 @@ body {
 .card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
@@ -306,6 +339,16 @@ input {
   outline: none;
 }
 
+select {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d1219;
+  color: var(--text);
+  font: inherit;
+}
+
 input::placeholder { color: #5c6a7f; }
 
 input:focus {
@@ -453,4 +496,40 @@ input:focus {
   gap: 10px;
   flex-wrap: wrap;
   margin-top: 20px;
+}
+
+/* ---------- users ---------- */
+
+.user-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr) auto auto;
+  gap: 10px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.users-list { margin-top: 12px; }
+
+.user-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.toggle-label input { min-height: auto; }
+
+@media (max-width: 720px) {
+  .account { grid-template-columns: 1fr auto; align-items: center; }
+  .user-form { grid-template-columns: 1fr; }
+  .user-row { grid-template-columns: 1fr auto; }
 }

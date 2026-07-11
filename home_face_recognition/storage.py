@@ -1,6 +1,10 @@
 """Persistence for people, face embeddings, and settings, backed by a Turso database."""
 
+import hashlib
+import hmac
+import secrets
 import struct
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +30,21 @@ _TABLES = [
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash BLOB NOT NULL,
+        password_salt BLOB NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'viewer')),
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS sessions (
+        token_hash BLOB PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        csrf_token TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+    )""",
 ]
 
 _PERSON_SUMMARY = (
@@ -35,6 +54,9 @@ _PERSON_SUMMARY = (
 )
 
 _KINDS = {"int": int, "float": float}
+_ROLES = {"admin", "viewer"}
+_SCRYPT_N = 1 << 14
+_SESSION_SECONDS = 7 * 24 * 60 * 60
 
 
 class StoreError(Exception):
@@ -133,6 +155,181 @@ class FaceStore:
     def person_count(self):
         """People with at least one embedding — those matching can find."""
         return len({entry["person_id"] for entry in self.known})
+
+    # -- authentication --------------------------------------------------
+
+    def user_count(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        return cursor.fetchone()[0]
+
+    def users(self):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, username, role, enabled, created_at FROM users ORDER BY lower(username)"
+        )
+        return [self._user_row(row) for row in cursor.fetchall()]
+
+    def create_user(self, username, password, role):
+        username, password, role = self._valid_credentials(username, password, role)
+        salt = secrets.token_bytes(16)
+        password_hash = self._hash_password(password, salt)
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+            if cursor.fetchone() is not None:
+                raise ValueError("Username already exists.")
+            cursor.execute(
+                "INSERT INTO users (username, password_hash, password_salt, role, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, password_hash, salt, role, _now()),
+            )
+            self.conn.commit()
+            cursor.execute(
+                "SELECT id, username, role, enabled, created_at FROM users WHERE username = ?",
+                (username,),
+            )
+            return self._user_row(cursor.fetchone())
+        except turso.Error as exc:
+            raise StoreError(f"Could not write to {self.path}: {exc}")
+
+    def authenticate(self, username, password):
+        if not isinstance(username, str) or not isinstance(password, str):
+            return None
+        if len(username) > 64 or len(password) > 1024:
+            return None
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, username, password_hash, password_salt, role, enabled, created_at "
+            "FROM users WHERE username = ?",
+            (username.strip(),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            # Keep unknown-user attempts expensive enough to resist enumeration.
+            self._hash_password(password, b"\0" * 16)
+            return None
+        user_id, name, expected, salt, role, enabled, created_at = row
+        actual = self._hash_password(password, salt)
+        if not enabled or not hmac.compare_digest(expected, actual):
+            return None
+        return self._user_row((user_id, name, role, enabled, created_at))
+
+    def create_session(self, user_id):
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(24)
+        expires_at = int(time.time()) + _SESSION_SECONDS
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM sessions WHERE expires_at <= ?", (int(time.time()),))
+        cursor.execute(
+            "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)",
+            (self._token_hash(token), user_id, csrf, expires_at),
+        )
+        self.conn.commit()
+        return token, csrf
+
+    def session(self, token):
+        if not token:
+            return None
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT users.id, users.username, users.role, users.enabled, users.created_at, "
+            "sessions.csrf_token FROM sessions JOIN users ON users.id = sessions.user_id "
+            "WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND users.enabled = 1",
+            (self._token_hash(token), int(time.time())),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        user = self._user_row(row[:5])
+        user["csrf_token"] = row[5]
+        return user
+
+    def delete_session(self, token):
+        if not token:
+            return
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM sessions WHERE token_hash = ?", (self._token_hash(token),))
+        self.conn.commit()
+
+    def update_user(self, user_id, updates, current_user_id):
+        unknown = set(updates) - {"role", "enabled"}
+        if unknown or not updates:
+            raise ValueError("Expected 'role' or 'enabled'.")
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, username, role, enabled, created_at FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        role = updates.get("role", row[2])
+        enabled = updates.get("enabled", bool(row[3]))
+        if role not in _ROLES or not isinstance(enabled, bool):
+            raise ValueError("Role must be admin or viewer and enabled must be true or false.")
+        if user_id == current_user_id and (role != "admin" or not enabled):
+            raise ValueError("You cannot remove your own admin access.")
+        if row[2] == "admin" and row[3] and (role != "admin" or not enabled):
+            self._require_another_admin(cursor, user_id)
+        cursor.execute("UPDATE users SET role = ?, enabled = ? WHERE id = ?", (role, int(enabled), user_id))
+        if not enabled:
+            cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+        return self._user_row((row[0], row[1], role, int(enabled), row[4]))
+
+    def delete_user(self, user_id, current_user_id):
+        if user_id == current_user_id:
+            raise ValueError("You cannot delete your own account.")
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT role, enabled FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        if row[0] == "admin" and row[1]:
+            self._require_another_admin(cursor, user_id)
+        cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.conn.commit()
+        return True
+
+    @staticmethod
+    def _hash_password(password, salt):
+        return hashlib.scrypt(password.encode(), salt=salt, n=_SCRYPT_N, r=8, p=1, dklen=32)
+
+    @staticmethod
+    def _token_hash(token):
+        return hashlib.sha256(token.encode()).digest()
+
+    @staticmethod
+    def _user_row(row):
+        return {
+            "id": row[0],
+            "username": row[1],
+            "role": row[2],
+            "enabled": bool(row[3]),
+            "created_at": row[4],
+        }
+
+    @staticmethod
+    def _valid_credentials(username, password, role):
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise ValueError("Username and password must be strings.")
+        username = username.strip()
+        if not 1 <= len(username) <= 64 or any(char.isspace() for char in username):
+            raise ValueError("Username must be 1-64 characters with no spaces.")
+        if len(password) < 12:
+            raise ValueError("Password must be at least 12 characters.")
+        if len(password) > 1024:
+            raise ValueError("Password is too long.")
+        if role not in _ROLES:
+            raise ValueError("Role must be admin or viewer.")
+        return username, password, role
+
+    @staticmethod
+    def _require_another_admin(cursor, user_id):
+        cursor.execute(
+            "SELECT 1 FROM users WHERE role = 'admin' AND enabled = 1 AND id != ?", (user_id,)
+        )
+        if cursor.fetchone() is None:
+            raise ValueError("At least one enabled admin is required.")
 
     # -- people ----------------------------------------------------------
 

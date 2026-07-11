@@ -51,18 +51,18 @@ everything else plugs into.
 
 Pure local-first auth. No Supabase, no Firebase, no OAuth round-trips.
 
-- [ ] First-run setup: when no users exist, the dashboard walks through
+- [x] First-run setup: when no users exist, the dashboard walks through
       creating the initial admin account
-- [ ] Username + password login with a battle-tested KDF (argon2 or scrypt);
+- [x] Username + password login with a battle-tested KDF (argon2 or scrypt);
       credentials stored in the same Turso database
-- [ ] Server-side sessions with HttpOnly, SameSite cookies; CSRF protection on
+- [x] Server-side sessions with HttpOnly, SameSite cookies; CSRF protection on
       mutating endpoints
-- [ ] User management in the dashboard: admins create, disable, and delete
+- [x] User management in the dashboard: admins create, disable, and delete
       users
-- [ ] Roles: **admin** (manage users, cameras, people, settings) and **viewer**
+- [x] Roles: **admin** (manage users, cameras, people, settings) and **viewer**
       (watch streams, see events)
-- [ ] Rate limiting / lockout on failed logins
-- [ ] Optional TLS (self-signed or user-provided certs) so credentials never
+- [x] Rate limiting / lockout on failed logins
+- [x] Optional TLS (self-signed or user-provided certs) so credentials never
       cross the LAN in plaintext — required before the server binds to
       anything other than localhost
 

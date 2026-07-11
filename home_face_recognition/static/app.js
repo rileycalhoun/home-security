@@ -2,6 +2,17 @@
 
 const $ = (id) => document.getElementById(id);
 
+const authScreen = $("authScreen");
+const authForm = $("authForm");
+const authTitle = $("authTitle");
+const authHelp = $("authHelp");
+const authUsername = $("authUsername");
+const authPassword = $("authPassword");
+const authSubmit = $("authSubmit");
+const authStatus = $("authStatus");
+const dashboard = $("dashboard");
+const accountName = $("accountName");
+const logoutButton = $("logout");
 const video = $("video");
 const overlay = $("overlay");
 const capture = $("capture");
@@ -23,12 +34,15 @@ const settingsForm = $("settingsForm");
 const settingsFields = $("settingsFields");
 const settingsReset = $("settingsReset");
 const settingsStatus = $("settingsStatus");
+const createUserForm = $("createUserForm");
+const usersList = $("usersList");
+const usersStatus = $("usersStatus");
 const overlayCtx = overlay.getContext("2d");
 const captureCtx = capture.getContext("2d");
 
 const LABEL_FONT =
   '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-const VIEWS = ["cameras", "people", "events", "settings"];
+const VIEWS = ["cameras", "people", "events", "settings", "users"];
 
 let settings = { scan_interval_ms: 450 };
 let settingsSpec = null;
@@ -39,13 +53,24 @@ let enrolling = false;
 let lastFaces = [];
 let lastFrame = { width: 1, height: 1 };
 let activeView = "cameras";
+let currentUser = null;
+let csrfToken = "";
+let setupRequired = false;
 
 // ---------- shared helpers ----------
 
 async function api(path, options = {}) {
+  const method = options.method || "GET";
+  if (csrfToken && !["GET", "HEAD"].includes(method)) {
+    options.headers = { ...options.headers, "X-CSRF-Token": csrfToken };
+  }
   const response = await fetch(`/api/v1${path}`, options);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -87,7 +112,8 @@ function emptyState(text) {
 
 function viewFromHash() {
   const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
-  return VIEWS.includes(name) ? name : "cameras";
+  const allowed = currentUser?.role === "admin" ? VIEWS : ["cameras", "events"];
+  return allowed.includes(name) ? name : "cameras";
 }
 
 function showView(name) {
@@ -99,6 +125,7 @@ function showView(name) {
   if (name === "cameras") drawFaces();
   if (name === "people") loadPeople();
   if (name === "settings") loadSettingsPage();
+  if (name === "users") loadUsers();
 }
 
 window.addEventListener("hashchange", () => showView(viewFromHash()));
@@ -411,6 +438,92 @@ function personCard(person) {
   return card;
 }
 
+// ---------- users ----------
+
+async function loadUsers() {
+  usersStatus.textContent = "";
+  try {
+    const data = await api("/users");
+    usersList.replaceChildren(...data.users.map(userCard));
+  } catch (error) {
+    usersStatus.textContent = error.message;
+  }
+}
+
+function userCard(user) {
+  const card = document.createElement("div");
+  card.className = "card person user-row";
+  const info = document.createElement("div");
+  info.className = "person-info";
+  const name = document.createElement("div");
+  name.className = "person-name";
+  name.textContent = user.username;
+  const meta = document.createElement("div");
+  meta.className = "person-meta";
+  meta.textContent = `Created ${formatDate(user.created_at)}`;
+  info.append(name, meta);
+
+  const role = document.createElement("select");
+  role.setAttribute("aria-label", `Role for ${user.username}`);
+  for (const value of ["viewer", "admin"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value[0].toUpperCase() + value.slice(1);
+    option.selected = user.role === value;
+    role.append(option);
+  }
+  const enabled = document.createElement("label");
+  enabled.className = "toggle-label";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = user.enabled;
+  enabled.append(checkbox, document.createTextNode(" Enabled"));
+  const remove = button("Delete", "ghost danger small");
+  const isSelf = user.id === currentUser.id;
+  role.disabled = isSelf;
+  checkbox.disabled = isSelf;
+  remove.disabled = isSelf;
+
+  const update = async () => {
+    try {
+      await api(`/users/${user.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: role.value, enabled: checkbox.checked }),
+      });
+      loadUsers();
+    } catch (error) {
+      usersStatus.textContent = error.message;
+      loadUsers();
+    }
+  };
+  role.addEventListener("change", update);
+  checkbox.addEventListener("change", update);
+  remove.addEventListener("click", async () => {
+    if (!confirm(`Delete ${user.username}?`)) return;
+    try {
+      await api(`/users/${user.id}`, { method: "DELETE" });
+      loadUsers();
+    } catch (error) {
+      usersStatus.textContent = error.message;
+    }
+  });
+  card.append(info, role, enabled, remove);
+  return card;
+}
+
+createUserForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(createUserForm);
+  try {
+    await api("/users", postJSON(Object.fromEntries(form)));
+    createUserForm.reset();
+    loadUsers();
+  } catch (error) {
+    usersStatus.textContent = error.message;
+  }
+});
+
 async function fillDetails(details, personId) {
   try {
     const person = await api(`/people/${personId}`);
@@ -551,6 +664,80 @@ settingsReset.addEventListener("click", () => {
 
 // ---------- startup ----------
 
+function showAuth(required) {
+  setupRequired = required;
+  dashboard.hidden = true;
+  authScreen.hidden = false;
+  authTitle.textContent = required ? "Create admin account" : "Sign in";
+  authHelp.textContent = required
+    ? "Set up the first local administrator."
+    : "Use your local account to continue.";
+  authSubmit.textContent = required ? "Create account" : "Sign in";
+  authPassword.autocomplete = required ? "new-password" : "current-password";
+  authStatus.textContent = "";
+  authUsername.focus();
+}
+
+async function openDashboard(user, token) {
+  currentUser = user;
+  csrfToken = token;
+  authScreen.hidden = true;
+  dashboard.hidden = false;
+  accountName.textContent = `${user.username} · ${user.role}`;
+  for (const link of document.querySelectorAll(".nav a")) {
+    link.hidden = user.role !== "admin" && !["cameras", "events"].includes(link.dataset.view);
+  }
+  enrollFace.hidden = user.role !== "admin";
+  showView(viewFromHash());
+  try {
+    const data = await api("/settings");
+    settings = data.settings;
+    settingsSpec = data.spec;
+  } catch {
+    // Viewers use the default scan interval; settings are admin-only.
+  }
+  if (user.role === "admin") {
+    try {
+      const data = await api("/people");
+      updateKnownBadge(data.people.filter((person) => person.embedding_count > 0).length);
+    } catch {
+      // The badge fills in on the first successful scan.
+    }
+  }
+  startCamera();
+}
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  authStatus.textContent = "";
+  authSubmit.disabled = true;
+  try {
+    const path = setupRequired ? "/auth/setup" : "/auth/login";
+    const data = await api(path, postJSON({
+      username: authUsername.value,
+      password: authPassword.value,
+    }));
+    authForm.reset();
+    await openDashboard(data.user, data.csrf_token);
+  } catch (error) {
+    authStatus.textContent = error.message;
+  } finally {
+    authSubmit.disabled = false;
+  }
+});
+
+logoutButton.addEventListener("click", async () => {
+  try {
+    await api("/auth/logout", { method: "POST" });
+  } finally {
+    currentUser = null;
+    csrfToken = "";
+    if (scanTimer) clearInterval(scanTimer);
+    if (video.srcObject) video.srcObject.getTracks().forEach((track) => track.stop());
+    showAuth(false);
+  }
+});
+
 window.addEventListener("resize", () => {
   if (activeView === "cameras") drawFaces();
 });
@@ -559,21 +746,14 @@ document.addEventListener("visibilitychange", () => {
 });
 
 async function init() {
-  showView(viewFromHash());
   try {
-    const data = await api("/settings");
-    settings = data.settings;
-    settingsSpec = data.spec;
-  } catch {
-    // Defaults keep the scan loop running until the server responds.
+    const data = await api("/auth/status");
+    if (data.user) return openDashboard(data.user, data.csrf_token);
+    showAuth(data.setup_required);
+  } catch (error) {
+    showAuth(false);
+    authStatus.textContent = `Could not reach server: ${error.message}`;
   }
-  try {
-    const data = await api("/people");
-    updateKnownBadge(data.people.filter((person) => person.embedding_count > 0).length);
-  } catch {
-    // The badge fills in on the first successful scan.
-  }
-  startCamera();
 }
 
 init();

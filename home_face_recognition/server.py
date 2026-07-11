@@ -2,8 +2,11 @@
 
 import argparse
 import json
+import ssl
 import threading
+import time
 import traceback
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +37,18 @@ class NotFound(Exception):
     pass
 
 
+class Unauthorized(Exception):
+    pass
+
+
+class Forbidden(Exception):
+    pass
+
+
+class RateLimited(Exception):
+    pass
+
+
 def load_static_assets():
     # Assets are read once at startup from a fixed allowlist, so arbitrary
     # paths can never reach the filesystem.
@@ -59,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
     store: ClassVar[FaceStore]
     lock: ClassVar[threading.Lock] = threading.Lock()
     static_assets: ClassVar[dict] = {}
+    secure_cookies: ClassVar[bool] = False
+    login_failures: ClassVar[dict] = {}
 
     def do_GET(self):
         self.dispatch("GET")
@@ -87,6 +104,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
         except NotFound:
             self.send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
+        except Unauthorized:
+            self.send_json({"error": "Authentication required."}, HTTPStatus.UNAUTHORIZED)
+        except Forbidden:
+            self.send_json({"error": "Admin access required."}, HTTPStatus.FORBIDDEN)
+        except RateLimited:
+            self.send_json(
+                {"error": "Too many failed logins. Try again in 15 minutes."},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
         except PayloadTooLarge:
             # The unread body would be misparsed as the next keep-alive
             # request, so drop the connection after responding.
@@ -113,8 +139,90 @@ class Handler(BaseHTTPRequestHandler):
         if resource == ["health"] and method == "GET":
             return self.send_json({"ok": True})
 
+        if resource == ["auth", "status"] and method == "GET":
+            with self.lock:
+                setup_required = self.store.user_count() == 0
+                user = None if setup_required else self.current_user()
+            payload = {"setup_required": setup_required, "user": self.public_user(user)}
+            if user:
+                payload["csrf_token"] = user["csrf_token"]
+            return self.send_json(payload)
+
+        if resource == ["auth", "setup"] and method == "POST":
+            body = self.read_json()
+            with self.lock:
+                if self.store.user_count():
+                    raise Forbidden()
+                user = self.store.create_user(body.get("username"), body.get("password"), "admin")
+                token, csrf = self.store.create_session(user["id"])
+            return self.auth_response(user, token, csrf, HTTPStatus.CREATED)
+
+        if resource == ["auth", "login"] and method == "POST":
+            body = self.read_json()
+            username = body.get("username", "")
+            password = body.get("password", "")
+            key = (
+                self.client_address[0],
+                username.strip().lower()[:64] if isinstance(username, str) else "",
+            )
+            with self.lock:
+                self.check_login_limit(key)
+                user = self.store.authenticate(username, password)
+                if user is None:
+                    if self.record_login_failure(key):
+                        raise RateLimited()
+                    raise Unauthorized()
+                self.login_failures.pop(key, None)
+                token, csrf = self.store.create_session(user["id"])
+            return self.auth_response(user, token, csrf)
+
+        user = self.require_user()
+
+        if resource == ["auth", "logout"] and method == "POST":
+            self.require_csrf(user)
+            with self.lock:
+                self.store.delete_session(self.session_token())
+            return self.send_json(
+                {"ok": True}, headers={"Set-Cookie": self.session_cookie("", max_age=0)}
+            )
+
+        if resource == ["users"]:
+            self.require_admin(user)
+            if method == "GET":
+                with self.lock:
+                    users = self.store.users()
+                return self.send_json({"users": users})
+            if method == "POST":
+                self.require_csrf(user)
+                body = self.read_json()
+                with self.lock:
+                    created = self.store.create_user(
+                        body.get("username"), body.get("password"), body.get("role")
+                    )
+                return self.send_json(created, HTTPStatus.CREATED)
+
+        if len(resource) == 2 and resource[0] == "users":
+            self.require_admin(user)
+            user_id = self.parse_id(resource[1])
+            self.require_csrf(user)
+            with self.lock:
+                if method == "PATCH":
+                    updated = self.store.update_user(user_id, self.read_json(), user["id"])
+                    if updated is None:
+                        raise NotFound()
+                    return self.send_json(updated)
+                if method == "DELETE":
+                    if not self.store.delete_user(user_id, user["id"]):
+                        raise NotFound()
+                    return self.send_json({"deleted": True})
+
         if resource == ["scan"] and method == "POST":
             return self.send_json(self.recognizer.scan(self.read_body()))
+
+        self.require_admin(user)
+
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            self.require_csrf(user)
 
         if resource == ["enroll"] and method == "POST":
             name = self.read_json().get("name", "")
@@ -156,6 +264,64 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"settings": settings})
 
         raise NotFound()
+
+    def current_user(self):
+        return self.store.session(self.session_token())
+
+    def require_user(self):
+        with self.lock:
+            user = self.current_user()
+        if user is None:
+            raise Unauthorized()
+        return user
+
+    @staticmethod
+    def require_admin(user):
+        if user["role"] != "admin":
+            raise Forbidden()
+
+    def require_csrf(self, user):
+        if self.headers.get("X-CSRF-Token") != user["csrf_token"]:
+            raise Forbidden()
+
+    def session_token(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        return cookie["session"].value if "session" in cookie else ""
+
+    @staticmethod
+    def public_user(user):
+        if not user:
+            return None
+        return {key: user[key] for key in ("id", "username", "role", "enabled", "created_at")}
+
+    def auth_response(self, user, token, csrf, status=HTTPStatus.OK):
+        return self.send_json(
+            {"user": self.public_user(user), "csrf_token": csrf},
+            status,
+            {"Set-Cookie": self.session_cookie(token)},
+        )
+
+    def session_cookie(self, token, max_age=7 * 24 * 60 * 60):
+        secure = "; Secure" if self.secure_cookies else ""
+        return f"session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
+
+    def check_login_limit(self, key):
+        failures = self.login_failures.get(key)
+        if failures and failures[1] > time.monotonic():
+            raise RateLimited()
+        if failures and failures[1]:
+            self.login_failures.pop(key, None)
+
+    def record_login_failure(self, key):
+        count, _ = self.login_failures.get(key, (0, 0))
+        count += 1
+        # ponytail: process-local lockout; persist it if restarts become an attack path.
+        self.login_failures[key] = (count, time.monotonic() + 900 if count >= 5 else 0)
+        return count >= 5
 
     def handle_person(self, method, person_id):
         if method == "GET":
@@ -208,15 +374,20 @@ class Handler(BaseHTTPRequestHandler):
             raise PayloadTooLarge()
         return self.rfile.read(length)
 
-    def send_json(self, payload, status=HTTPStatus.OK):
-        self.send_bytes(status, json.dumps(payload).encode(), "application/json")
+    def send_json(self, payload, status=HTTPStatus.OK, headers=None):
+        self.send_bytes(status, json.dumps(payload).encode(), "application/json", headers)
 
-    def send_bytes(self, status, body, content_type):
+    def send_bytes(self, status, body, content_type, headers=None):
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'self'; media-src 'self' blob:")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -238,7 +409,22 @@ def main(argv=None):
         default=DEFAULT_DB_FILENAME,
         help="path to the face database (default: %(default)s in the current directory)",
     )
+    parser.add_argument("--tls-cert", help="PEM certificate for HTTPS")
+    parser.add_argument("--tls-key", help="PEM private key for HTTPS")
     args = parser.parse_args(argv)
+
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("--tls-cert and --tls-key must be provided together")
+    if args.host not in {"127.0.0.1", "::1", "localhost"} and not args.tls_cert:
+        parser.error("TLS is required when binding outside localhost")
+
+    context = None
+    if args.tls_cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            context.load_cert_chain(args.tls_cert, args.tls_key)
+        except (OSError, ssl.SSLError) as exc:
+            raise SystemExit(f"error: could not load TLS certificate ({exc})")
 
     try:
         store = FaceStore(args.db)
@@ -251,14 +437,20 @@ def main(argv=None):
     Handler.store = store
     Handler.recognizer = Recognizer(store, Handler.lock)
     Handler.static_assets = load_static_assets()
+    Handler.secure_cookies = bool(args.tls_cert)
+    Handler.login_failures = {}
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
         raise SystemExit(f"error: could not bind {args.host}:{args.port} ({exc})")
 
+    if context:
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+
     print(f"Known people: {store.person_count()}")
-    print(f"Open http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}")
+    scheme = "https" if args.tls_cert else "http"
+    print(f"Open {scheme}://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
