@@ -1,21 +1,29 @@
 # Home Face Recognition
 
 Local, browser-based face recognition — the first building block of a DIY home
-security system. Your webcam feed is scanned in real time, known faces are
-labeled in green, unknown faces in amber, and you can enroll new faces with one
-click. Everything runs on your machine: no cloud, no accounts, no telemetry.
+security system. A small dashboard shows your webcam feed scanned in real
+time: known faces are labeled in green, unknown faces in amber. Enroll people
+from the camera view, manage them on the People page, and tune recognition on
+the Settings page. Everything runs on your machine: no cloud, no accounts, no
+telemetry.
 
 ## How it works
 
 - The browser captures webcam frames and posts a downscaled JPEG to the local
-  server every ~450 ms.
+  server on a configurable interval (450 ms by default).
 - [MTCNN](https://github.com/timesler/facenet-pytorch) detects faces, and an
   InceptionResnetV1 (FaceNet, pretrained on VGGFace2) turns each face into a
   512-dimensional embedding.
-- Each embedding is compared against the saved database by Euclidean distance;
-  anything within `MATCH_DISTANCE` of a saved face is labeled with that name.
-- Saved faces live in `known_faces.db`, a [Turso](https://github.com/tursodatabase/turso)
-  database (SQLite-compatible) next to where you run the server.
+- Each embedding is compared against every enrolled embedding by Euclidean
+  distance; anything within the match-distance threshold is labeled with that
+  person's name. A person can have several enrollments (different angles,
+  lighting) and matches against all of them.
+- People, their embeddings, and settings live in `known_faces.db`, a
+  [Turso](https://github.com/tursodatabase/turso) database (SQLite-compatible)
+  next to where you run the server. Databases from v0.1 are migrated in place
+  on first start.
+- The dashboard talks to a versioned JSON API under `/api/v1/` (people CRUD,
+  scan, enroll, settings) that future integrations share.
 
 ## Quick start
 
@@ -30,9 +38,11 @@ Then open <http://localhost:3000>. The first run downloads PyTorch and about
 110 MB of model weights, so it takes a while; after that startup is a few
 seconds.
 
-To enroll someone, wait until their face is boxed, click **Save this face**,
-and type a name. Saving the same person a few times (different angles,
-lighting) improves recognition.
+To enroll someone, wait until their face is boxed, click **Enroll this face**,
+and type a name — live quality feedback warns when the face is too small or
+the shot is too dark. Enrolling the same name a few times (different angles,
+lighting) improves recognition; the People page lists everyone with their
+enrollments, and lets you rename or delete them.
 
 ### Options
 
@@ -44,12 +54,16 @@ lighting) improves recognition.
 
 ### Tuning
 
-Recognition knobs live in `home_face_recognition/config.py`:
+The recognition knobs live on the dashboard's **Settings** page and persist in
+the database:
 
-- `MATCH_DISTANCE` — lower if it confuses similar faces, higher if it misses
+- **Match distance** — lower if it confuses similar faces, higher if it misses
   people it should know.
-- `MIN_FACE_PROBABILITY` — minimum detector confidence to count as a face.
-- `SCAN_EVERY_MS` / `DETECTION_WIDTH` — trade accuracy for CPU.
+- **Detection confidence** — minimum detector confidence to count as a face.
+- **Scan interval** — trade responsiveness for CPU.
+
+Lower-level defaults (detection width, enrollment quality thresholds) live in
+`home_face_recognition/config.py`.
 
 ## Privacy
 

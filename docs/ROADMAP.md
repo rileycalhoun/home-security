@@ -34,17 +34,17 @@ priorities change, but the guiding principles don't.
 Turn the single page into the skeleton of a real dashboard — the surface
 everything else plugs into.
 
-- [ ] Dashboard layout: sidebar navigation (Cameras, People, Events, Settings),
+- [x] Dashboard layout: sidebar navigation (Cameras, People, Events, Settings),
       responsive down to phone width
-- [ ] **People page**: list enrolled faces with name, enrollment count, and
+- [x] **People page**: list enrolled faces with name, enrollment count, and
       date; rename and delete entries
-- [ ] Multiple embeddings per person (enroll several angles under one name;
+- [x] Multiple embeddings per person (enroll several angles under one name;
       match against all of them) with per-person management
-- [ ] Enrollment flow with live preview and quality feedback ("face too small",
+- [x] Enrollment flow with live preview and quality feedback ("face too small",
       "too dark")
-- [ ] Settings page exposing the tuning knobs (`MATCH_DISTANCE`, scan interval,
+- [x] Settings page exposing the tuning knobs (`MATCH_DISTANCE`, scan interval,
       detection confidence) with persistence in the database
-- [ ] REST API cleanup: versioned JSON API (`/api/v1/...`) so the dashboard and
+- [x] REST API cleanup: versioned JSON API (`/api/v1/...`) so the dashboard and
       future integrations share one interface
 
 ## v0.3 — Local authentication
